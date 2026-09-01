@@ -5,6 +5,7 @@ import logging
 import os
 from datetime import datetime
 import asyncio
+import aiosqlite
 
 logger = logging.getLogger('discord')
 
@@ -26,24 +27,22 @@ class TestCommands(commands.Cog):
         
         await interaction.response.send_message(embed=embed)
     
-    @app_commands.command(name="test_db", description="Test database connection")
+    @app_commands.command(name="test_db", description="Test SQLite database connection")
     async def test_db(self, interaction: discord.Interaction):
         await interaction.response.defer()
         
         try:
-            if not self.bot.db or not self.bot.db.pool:
-                await interaction.followup.send("Database pool not initialized!")
+            if not self.bot.db or not self.bot.db.db_path:
+                await interaction.followup.send("Database not initialized!")
                 return
             
-            async with self.bot.db.pool.acquire() as conn:
-                result = await conn.fetchval('SELECT 1')
+            async with aiosqlite.connect(self.bot.db.db_path) as conn:
+                async with conn.execute('SELECT 1') as cursor:
+                    result = await cursor.fetchone()
             
-            async with self.bot.db.pool.acquire() as conn:
-                tables = await conn.fetch("""
-                    SELECT table_name 
-                    FROM information_schema.tables 
-                    WHERE table_schema = 'public'
-                """)
+            async with aiosqlite.connect(self.bot.db.db_path) as conn:
+                async with conn.execute("SELECT name FROM sqlite_master WHERE type='table'") as cursor:
+                    tables = await cursor.fetchall()
             
             user_count = len(await self.bot.db.get_all_users())
             
@@ -56,7 +55,7 @@ class TestCommands(commands.Cog):
             embed.add_field(name="Tables Found", value=str(len(tables)), inline=True)
             embed.add_field(name="Linked Users", value=str(user_count), inline=True)
             
-            table_list = "\n".join([f"- {t['table_name']}" for t in tables])
+            table_list = "\n".join([f"- {t[0]}" for t in tables])
             embed.add_field(name="Tables", value=table_list or "None", inline=False)
             
             await interaction.followup.send(embed=embed)
@@ -69,7 +68,6 @@ class TestCommands(commands.Cog):
                 description=f"Error: {str(e)}",
                 color=discord.Color.red()
             )
-            embed.add_field(name="Tip", value="Check DATABASE_URL in .env file", inline=False)
             
             await interaction.followup.send(embed=embed)
     
@@ -238,11 +236,13 @@ class TestCommands(commands.Cog):
         await interaction.response.defer()
         
         try:
-            from utils.ai_news_picker import AINewsPicker
+            admin_cog = self.bot.get_cog("AdminCog")
+            if not admin_cog:
+                await interaction.followup.send("AdminCog not loaded - AI News feature may be offline.")
+                return
             
-            picker = AINewsPicker(self.bot.db)
-            
-            member = await picker.pick_random_member(interaction.guild, interaction.channel)
+            selector = admin_cog.selector_service
+            member = await selector.pick_random_member(interaction.guild)
             
             if member:
                 embed = discord.Embed(
@@ -251,16 +251,16 @@ class TestCommands(commands.Cog):
                     color=discord.Color.green()
                 )
                 embed.add_field(name="Selected User", value=member.mention, inline=True)
-                embed.add_field(name="Is Admin", value="No" if not member.guild_permissions.administrator else "Yes (shouldn't happen!)", inline=True)
+                embed.add_field(name="Is Admin", value="No" if not any(role.name == selector.admin_role_name for role in member.roles) else "Yes (shouldn't happen!)", inline=True)
                 
-                recent = await self.bot.db.get_recent_ai_news_assignees(weeks=4)
+                recent = await admin_cog.assignment_repo.get_recent_assignments(4)
                 embed.add_field(
-                    name="Recent Assignees (4 weeks)",
+                    name="Recent Assignees (4 entries)",
                     value=str(len(recent)),
                     inline=True
                 )
                 
-                embed.set_footer(text="This is a test - no assignment was made")
+                embed.set_footer(text="Warning: This test actually triggered an assignment in the database.")
                 
             else:
                 embed = discord.Embed(
@@ -270,7 +270,7 @@ class TestCommands(commands.Cog):
                 )
                 embed.add_field(
                     name="Possible Reasons",
-                    value="- All members are admins\n- All members assigned recently\n- No members in server",
+                    value="- All members are admins\n- All members blacklisted\n- No members in server",
                     inline=False
                 )
             
@@ -286,7 +286,7 @@ class TestCommands(commands.Cog):
             )
             await interaction.followup.send(embed=embed)
     
-    @app_commands.command(name="test_ai_news_2", description="Test AI news embed (sends actual assignment message)")
+    @app_commands.command(name="test_ai_news_2", description="Test AI news embed")
     @app_commands.checks.has_permissions(administrator=True)
     async def test_ai_news_2(self, interaction: discord.Interaction):
         try:
@@ -295,9 +295,12 @@ class TestCommands(commands.Cog):
             pass
         
         try:
-            from utils.ai_news_picker import AINewsPicker
-            picker = AINewsPicker(self.bot.db)
-            await picker.set_current_assignee(interaction.user.id)
+            admin_cog = self.bot.get_cog("AdminCog")
+            if not admin_cog:
+                await interaction.followup.send("AdminCog not loaded.")
+                return
+            
+            await admin_cog.assignment_service.assignment_repo.create_assignment(interaction.user.id, datetime.utcnow())
             
             embed = discord.Embed(
                 title="📰 Weekly AI News Time!",
@@ -306,14 +309,13 @@ class TestCommands(commands.Cog):
                            f"The news will be posted on social media Thursday.",
                 color=discord.Color.blue()
             )
-            embed.set_footer(text="Reply in this channel or react with 👍 to mark as complete (Test)")
+            embed.set_footer(text="Reply in this channel to mark as complete (Test)")
             
             await interaction.channel.send(interaction.user.mention)
-            message = await interaction.channel.send(embed=embed)
-            await message.add_reaction("👍")
+            await interaction.channel.send(embed=embed)
             
             try:
-                await interaction.followup.send("✅ Test embed sent! React with 👍 on the bot's reaction or send a message!", ephemeral=True)
+                await interaction.followup.send("✅ Test embed sent! Send a message in the news channel to see the bot mark it as complete!", ephemeral=True)
             except:
                 pass
             
@@ -336,7 +338,10 @@ class TestCommands(commands.Cog):
     @app_commands.command(name="test_background_tasks", description="Check background task status")
     async def test_background_tasks(self, interaction: discord.Interaction):
         try:
-            from main import submission_checker, weekly_reset, ai_news_reminder
+            from main import submission_checker, weekly_reset
+            
+            scheduler_cog = self.bot.get_cog("SchedulerCog")
+            ai_news_task = scheduler_cog.weekly_selection if scheduler_cog else None
 
             embed = discord.Embed(
                 title="Background Tasks Diagnostics",
@@ -344,12 +349,14 @@ class TestCommands(commands.Cog):
             )
 
             def inspect_task(task_obj, pretty_name):
+                if not task_obj:
+                    return f"**{pretty_name}**\n- Not Found (Cog not loaded?)"
+                
                 try:
                     running = bool(task_obj.is_running())
                 except Exception:
                     running = False
 
-                # Attempt to read next_iteration if present
                 next_it = None
                 try:
                     next_it = getattr(task_obj, 'next_iteration', None)
@@ -371,7 +378,6 @@ class TestCommands(commands.Cog):
                 else:
                     lines.append(f"- Next iteration: `None`")
 
-                # If not running, attempt to start the task (best-effort)
                 start_attempt = None
                 if not running:
                     try:
@@ -391,7 +397,7 @@ class TestCommands(commands.Cog):
             parts = [
                 inspect_task(submission_checker, "Submission Checker"),
                 inspect_task(weekly_reset, "Weekly Reset"),
-                inspect_task(ai_news_reminder, "AI News Reminder"),
+                inspect_task(ai_news_task, "AI News Weekly Selection"),
             ]
 
             embed.description = "\n\n".join(parts)
@@ -417,24 +423,16 @@ class TestCommands(commands.Cog):
             token_status = "Set" if token else "Missing"
             embed.add_field(name="TOKEN", value=token_status, inline=True)
             
-            db_url = os.getenv('DATABASE_URL')
-            if db_url:
-                if '@' in db_url:
-                    parts = db_url.split('@')
-                    host = parts[1].split('/')[0]
-                    db_status = f"Set\nHost: `{host}`"
-                else:
-                    db_status = "Set but malformed"
-            else:
-                db_status = "Missing"
-            embed.add_field(name="DATABASE_URL", value=db_status, inline=True)
-            
             channel_id = os.getenv('AI_NEWS_CHANNEL_ID')
             channel_status = f"Set: `{channel_id}`" if channel_id else "Missing"
             embed.add_field(name="AI_NEWS_CHANNEL_ID", value=channel_status, inline=True)
             
-            all_set = token and db_url and channel_id
-            overall = "All environment variables are set!" if all_set else "Some variables are missing"
+            dsa_id = os.getenv('DSA_CHANNEL_ID')
+            dsa_status = f"Set: `{dsa_id}`" if dsa_id else "Missing"
+            embed.add_field(name="DSA_CHANNEL_ID", value=dsa_status, inline=True)
+            
+            all_set = token and channel_id
+            overall = "All essential environment variables are set!" if all_set else "Some variables are missing"
             embed.add_field(name="Status", value=overall, inline=False)
             
             if not all_set:
@@ -470,10 +468,11 @@ class TestCommands(commands.Cog):
             results.append("[FAIL] **Bot Online**: Failed")
         
         try:
-            if self.bot.db and self.bot.db.pool:
-                async with self.bot.db.pool.acquire() as conn:
-                    await conn.fetchval('SELECT 1')
-                results.append("[OK] **Database**: Connected")
+            if self.bot.db and self.bot.db.db_path:
+                async with aiosqlite.connect(self.bot.db.db_path) as conn:
+                    async with conn.execute('SELECT 1') as cursor:
+                        await cursor.fetchone()
+                results.append("[OK] **Database**: Connected to SQLite")
             else:
                 results.append("[FAIL] **Database**: Not initialized")
         except Exception as e:
@@ -508,8 +507,11 @@ class TestCommands(commands.Cog):
             results.append("[FAIL] **AI News Channel**: Error")
         
         try:
-            from main import submission_checker, weekly_reset, ai_news_reminder
-            running = submission_checker.is_running() and weekly_reset.is_running() and ai_news_reminder.is_running()
+            from main import submission_checker, weekly_reset
+            scheduler_cog = self.bot.get_cog("SchedulerCog")
+            ai_news_task = scheduler_cog.weekly_selection if scheduler_cog else None
+            
+            running = submission_checker.is_running() and weekly_reset.is_running() and (ai_news_task and ai_news_task.is_running())
             if running:
                 results.append("[OK] **Background Tasks**: All running")
             else:

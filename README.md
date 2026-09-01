@@ -1,2 +1,2 @@
-# augumentix-bot
-Discord Bot for the Augumentix College Club
+# augmentix-bot
+Discord Bot for the Augmentix College Club

@@ -55,9 +55,6 @@ class LeetCodeBot(commands.Bot):
         if not weekly_reset.is_running():
             weekly_reset.start()
             logger.info('[TASK] weekly_reset started')
-        if not ai_news_reminder.is_running():
-            ai_news_reminder.start()
-            logger.info('[TASK] ai_news_reminder started')
         if not post_daily_leetcode_question.is_running():
             post_daily_leetcode_question.start()
             logger.info('[TASK] post_daily_leetcode_question started')
@@ -125,7 +122,6 @@ async def task_heartbeat():
     logger.debug('[HEARTBEAT] Background task status report')
     logger.debug(_task_status(submission_checker,            'submission_checker'))
     logger.debug(_task_status(weekly_reset,                  'weekly_reset'))
-    logger.debug(_task_status(ai_news_reminder,              'ai_news_reminder'))
     logger.debug(_task_status(post_daily_leetcode_question,  'post_daily_leetcode_question'))
     logger.debug(_task_status(post_daily_leetcode_solution,  'post_daily_leetcode_solution'))
     logger.debug('─' * 90)
@@ -228,77 +224,6 @@ async def before_weekly_reset():
 async def weekly_reset_error(error):
     _task_error_counts['weekly_reset'] = _task_error_counts.get('weekly_reset', 0) + 1
     logger.error(f'[TASK:weekly_reset] Unhandled loop error: {error}', exc_info=error)
-
-
-@tasks.loop(time=time(hour=5, minute=0)) 
-async def ai_news_reminder():
-    _task_name = 'ai_news_reminder'
-    logger.info(f'[TASK:{_task_name}] Starting iteration #{ai_news_reminder.current_loop}')
-    try:
-        if datetime.now().weekday() == 2:  
-            logger.info(f'[TASK:{_task_name}] It\'s Wednesday — checking if reminder needed...')
-            
-            channel_id = int(os.getenv('AI_NEWS_CHANNEL_ID', 0))
-            if not channel_id:
-                logger.warning(f'[TASK:{_task_name}] AI_NEWS_CHANNEL_ID not set')
-                return
-            
-            channel = bot.get_channel(channel_id)
-            if not channel:
-                logger.warning(f'[TASK:{_task_name}] Channel {channel_id} not found')
-                return
-            
-            from utils.ai_news_picker import AINewsPicker
-            picker = AINewsPicker(bot.db)
-            
-            should_send = await picker.should_send_reminder()
-            logger.debug(f'[TASK:{_task_name}] should_send_reminder={should_send}')
-            
-            if should_send:
-                member = await picker.pick_random_member(channel.guild, channel)
-                
-                if member:
-                    logger.info(f'[TASK:{_task_name}] Selected member: {member.name} ({member.id})')
-                    embed = discord.Embed(
-                        title="Weekly AI News Time!",
-                        description=f"{member.mention}, you've been selected to share this week's top AI news!\n\n"
-                                    f"Please share the most interesting AI developments from this week. "
-                                    f"The news will be posted on social media Thursday.",
-                        color=discord.Color.blue()
-                    )
-                    embed.set_footer(text="Reply in this channel to mark as complete")
-                    
-                    await channel.send(member.mention)
-                    message = await channel.send(embed=embed)
-                    await picker.set_current_assignee(member.id)
-                    logger.info(f'[TASK:{_task_name}] Reminder sent to {member.name}')
-                else:
-                    logger.warning(f'[TASK:{_task_name}] No eligible member found to assign')
-            else:
-                logger.info(f'[TASK:{_task_name}] Reminder not needed this week')
-        else:
-            logger.debug(f'[TASK:{_task_name}] Not Wednesday (weekday={datetime.now().weekday()}) — skipping')
-        
-        _task_last_run[_task_name] = datetime.now()
-    except Exception as e:
-        _task_error_counts[_task_name] = _task_error_counts.get(_task_name, 0) + 1
-        logger.error(f'[TASK:{_task_name}] Error: {e}')
-
-@ai_news_reminder.before_loop
-async def before_ai_news_reminder():
-    while True:
-        try:
-            if bot.is_ready():
-                logger.debug('[TASK:ai_news_reminder] Bot ready — loop starting')
-                return
-            await asyncio.sleep(1)
-        except RuntimeError:
-            await asyncio.sleep(1)
-
-@ai_news_reminder.error
-async def ai_news_reminder_error(error):
-    _task_error_counts['ai_news_reminder'] = _task_error_counts.get('ai_news_reminder', 0) + 1
-    logger.error(f'[TASK:ai_news_reminder] Unhandled loop error: {error}', exc_info=error)
 
 
 @tasks.loop(time=time(hour=9, minute=0))
